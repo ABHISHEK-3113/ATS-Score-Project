@@ -4,51 +4,103 @@ import os
 import PyPDF2 as pdf
 from dotenv import load_dotenv
 import json
+import re
+import string
 
-load_dotenv() ## load all our environment variables
+# Load environment variables
+load_dotenv()
+genai.configure(api_key="AIzaSyBfxFqHgQ626izoYOdz8UdVtcAis2Q_Q_A")  # Replace with os.getenv("GOOGLE_API_KEY") in prod
 
-genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-
-def get_gemini_repsonse(input):
-    model=genai.GenerativeModel('gemini-pro')
-    response=model.generate_content(input)
-    return response.text
-
+# PDF text extractor
 def input_pdf_text(uploaded_file):
-    reader=pdf.PdfReader(uploaded_file)
-    text=""
-    for page in range(len(reader.pages)):
-        page=reader.pages[page]
-        text+=str(page.extract_text())
+    reader = pdf.PdfReader(uploaded_file)
+    text = ""
+    for page in reader.pages:
+        text += str(page.extract_text())
     return text
 
-#Prompt Template
+from textblob import TextBlob
+from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
 
-input_prompt="""
-Hey Act Like a skilled or very experience ATS(Application Tracking System)
-with a deep understanding of tech field,software engineering,data science ,data analyst
-and big data engineer. Your task is to evaluate the resume based on the given job description.
-You must consider the job market is very competitive and you should provide 
-best assistance for improving thr resumes. Assign the percentage Matching based 
-on Jd and
-the missing keywords with high accuracy
-resume:{text}
-description:{jd}
+def extract_relevant_keywords(text):
+    blob = TextBlob(text.lower())
+    
+    # POS tagging + stopword removal
+    keywords = [
+        word.lemmatize()
+        for word, tag in blob.tags
+        if tag.startswith(('NN', 'VB', 'JJ'))  # Keep nouns, verbs, adjectives
+        and word.isalpha()
+        and word not in ENGLISH_STOP_WORDS
+    ]
 
-I want the response in one single string having the structure
-{{"JD Match":"%","MissingKeywords:[]","Profile Summary":""}}
+    return list(set(keywords))
+
+# Response parser
+def parse_response(response_text):
+    try:
+        match = re.search(r"\{.*\}", response_text, re.DOTALL)
+        if match:
+            return json.loads(match.group())
+        else:
+            return {"error": "❗ Gemini did not return valid JSON format."}
+    except Exception as e:
+        return {"error": f"❗ Failed to parse response: {e}"}
+
+# Gemini API
+def get_gemini_response(prompt):
+    model = genai.GenerativeModel(model_name="models/gemini-1.5-pro")
+    response = model.generate_content(prompt)
+    return parse_response(response.text)
+
+# Prompt Template
+input_prompt = """
+You are an advanced ATS system. ONLY respond in valid JSON format like this:
+{{"JD Match":"<match>%", "MissingKeywords":["<keyword1>", "<keyword2>"], "Profile Summary":"<summary>"}}
+
+Evaluate the following resume against the job description.
+
+Resume:
+{text}
+
+Job Description:
+{jd}
+
+The resume and JD keywords have been extracted using simple keyword analysis.
 """
 
-## streamlit app
-st.title("Smart ATS")
-st.text("Improve Your Resume ATS")
-jd=st.text_area("Paste the Job Description")
-uploaded_file=st.file_uploader("Upload Your Resume",type="pdf",help="Please uplaod the pdf")
+# Streamlit App
+st.title("📄 Smart ATS Resume Checker")
+st.text("Get resume match insights based on job descriptions!")
 
-submit = st.button("Submit")
+jd = st.text_area("📌 Paste the Job Description")
+uploaded_file = st.file_uploader("📁 Upload Your Resume (PDF only)", type="pdf")
+
+submit = st.button("🚀 Submit")
 
 if submit:
-    if uploaded_file is not None:
-        text=input_pdf_text(uploaded_file)
-        response=get_gemini_repsonse(input_prompt)
-        st.subheader(response)
+    if uploaded_file and jd.strip():
+        with st.spinner("Analyzing..."):
+            resume_text = input_pdf_text(uploaded_file)
+
+            # Extract keywords (for your reference/debugging, not sent)
+            jd_keywords = extract_relevant_keywords(jd)
+            resume_keywords = extract_relevant_keywords(resume_text)
+
+            # Format prompt
+            prompt = input_prompt.format(text=resume_text, jd=jd)
+            result = get_gemini_response(prompt)
+
+        if "error" in result:
+            st.error(result["error"])
+        else:
+            st.subheader("✅ JD Match:")
+            st.write(result["JD Match"])
+
+            st.subheader("📌 Missing Keywords:")
+            st.write(result["MissingKeywords"])
+
+            st.subheader("📝 Profile Summary Suggestion:")
+            st.write(result["Profile Summary"])
+    else:
+        st.warning("Please upload a resume and provide a job description.")
